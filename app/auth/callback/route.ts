@@ -12,11 +12,11 @@ export async function GET(request: Request) {
         if (data.session && !error) {
             // Check if user has completed onboarding
             if (!data.session.user.user_metadata?.field) {
-                return NextResponse.redirect(`${requestUrl.origin}/onboarding`);
+                return NextResponse.redirect(`https://cariskill-frontend.vercel.app/onboarding`);
             }
         }
     }
 
     // URL to redirect to after sign in process completes or if no code
-    return NextResponse.redirect(`${requestUrl.origin}/explore`);
+    return NextResponse.redirect(`https://cariskill-frontend.vercel.app/explore`);
 }
