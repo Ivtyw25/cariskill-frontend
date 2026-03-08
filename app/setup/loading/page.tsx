@@ -36,7 +36,7 @@ const preInsertRoadmapDB = async (supabase: any, userId: string, activeTopic: st
 };
 
 const fetchRoadmapFromAI = async (sessionId: string, activeTopic: string, payload: any) => {
-  const Url = 'https://master-flow-1089642284343.us-central1.run.app';
+  const Url = 'https://master-flow-api-1089642284343.us-central1.run.app';
   const response = await fetch(`${Url}/api/start_macro`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
