@@ -10,13 +10,11 @@ export async function GET(request: Request) {
         const { data, error } = await supabase.auth.exchangeCodeForSession(code);
 
         if (data.session && !error) {
-            // Check if user has completed onboarding
-            if (!data.session.user.user_metadata?.field) {
-                return NextResponse.redirect(`https://cariskill-frontend.vercel.app/onboarding`);
-            }
+            // Check if user has completed onboarding bypassed
+            // Proceed to standard redirection
         }
     }
 
     // URL to redirect to after sign in process completes or if no code
-    return NextResponse.redirect(`https://cariskill-frontend.vercel.app/explore`);
+    return NextResponse.redirect(`${requestUrl.origin}/explore`);
 }

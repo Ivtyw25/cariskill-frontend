@@ -41,7 +41,7 @@ export default function RegisterPage() {
     // Success - user is created. Often Supabase requires email verification.
     // For now, if session exists or successfully created, we route to onboarding.
     if (data.session) {
-      router.push('/onboarding');
+      router.push('/explore');
     } else {
       // If email confirmation is required, inform user
       alert('Registration successful! Please check your email to confirm your account.');
@@ -56,7 +56,7 @@ export default function RegisterPage() {
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {
-        redirectTo: `https://cariskill-frontend.vercel.app/auth/callback`,
+        redirectTo: `${window.location.origin}/auth/callback`,
       },
     });
 

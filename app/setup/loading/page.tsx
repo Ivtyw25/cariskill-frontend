@@ -36,7 +36,7 @@ const preInsertRoadmapDB = async (supabase: any, userId: string, activeTopic: st
 };
 
 const fetchRoadmapFromAI = async (sessionId: string, activeTopic: string, payload: any) => {
-  const Url = 'https://master-flow-api-1089642284343.us-central1.run.app';
+  const Url = 'http://localhost:8000';
   const response = await fetch(`${Url}/api/start_macro`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -289,6 +289,17 @@ function LoadingRoadmapContent() {
           await updateRoadmapDB(supabase, dbRecordId, activeTopic, parsedRoadmap, totalTimeMinutes);
           await insertMicroTopicsDB(supabase, dbRecordId, rawResult);
           await insertGraphNodesDB(supabase, dbRecordId, parsedRoadmap);
+
+          // NEW STEP: Trigger skill replacement logic in the background
+          try {
+            fetch('/api/skills/replace', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ addedSkill: activeTopic })
+            }).catch(e => console.error("Background replacement error:", e));
+          } catch (e) {
+            console.error("Replacement API fetch trigger failed:", e);
+          }
         }
 
         // 5. Finalize UI navigation

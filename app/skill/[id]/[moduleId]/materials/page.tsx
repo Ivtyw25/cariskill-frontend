@@ -4,14 +4,24 @@ import { use, useState, useEffect, useRef } from 'react';
 import Navbar from '@/components/Navbar';
 import Footer from '@/components/Footer';
 import { useRouter } from 'next/navigation';
-import { motion } from 'framer-motion';
-import { ArrowLeft, Bookmark, Flag, Play, Volume2, Maximize2, ChevronLeft, ChevronRight, Loader2, CheckCircle } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import { ArrowLeft, Bookmark, Flag, Play, Volume2, Maximize2, ChevronLeft, ChevronRight, Loader2, CheckCircle, Pencil, MessageSquarePlus, X } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import BookmarkButton from '@/components/BookmarkButton';
+import PodcastPlayer from '@/components/PodcastPlayer';
+import ContextChatbot from '@/components/ContextChatbot';
+import { useSkillLanguage } from '@/components/SkillLanguageProvider';
+
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 
 export default function MaterialsPage({ params }: { params: Promise<{ id: string, moduleId: string }> }) {
   const { id, moduleId } = use(params);
   const router = useRouter();
+  const { currentLanguage, translateText } = useSkillLanguage();
 
   const [loading, setLoading] = useState(true);
   const [isFinishing, setIsFinishing] = useState(false);
@@ -19,23 +29,83 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
 
   // Data State
   const [moduleTitle, setModuleTitle] = useState("Loading Topic...");
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [microTopics, setMicroTopics] = useState<any[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
+
+  // Highlighter State
+  const [isHighlighterMode, setIsHighlighterMode] = useState(false);
+  const [selectedText, setSelectedText] = useState("");
+  const [showChatbot, setShowChatbot] = useState(false);
+
+  // Feedback State
+  const [showFeedbackModal, setShowFeedbackModal] = useState(false);
+  const [feedbackText, setFeedbackText] = useState("");
+  const [isSubmittingFeedback, setIsSubmittingFeedback] = useState(false);
+  const [topicIds, setTopicIds] = useState<string[]>([]);
+
+  const handleContentMouseUp = () => {
+    if (!isHighlighterMode) return;
+    const text = window.getSelection()?.toString().trim();
+    if (text && text.length > 0) {
+      setSelectedText(text);
+      setShowChatbot(true);
+    }
+  };
+
+  const handleFeedbackSubmit = async () => {
+    if (!feedbackText.trim()) return;
+    setIsSubmittingFeedback(true);
+    try {
+      const response = await fetch('/api/improve-topic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          dbId: topicIds[activeIndex],
+          currentContent: currentTopic.theory_explanation,
+          feedback: feedbackText
+        })
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to process feedback");
+      }
+
+      const data = await response.json();
+
+      // Update the UI state with the rewritten content without refreshing the page
+      setMicroTopics(prev => prev.map((t, idx) =>
+        idx === activeIndex ? { ...t, theory_explanation: data.updatedContent } : t
+      ));
+
+    } catch (e) {
+      console.error("Failed to submit feedback", e);
+    } finally {
+      setIsSubmittingFeedback(false);
+      setShowFeedbackModal(false);
+      setFeedbackText("");
+      // Alert can optionally be replaced by a toast in future
+      alert("Thank you for your feedback! We will use this to improve the content.");
+    }
+  };
 
   useEffect(() => {
     const fetchMaterials = async () => {
       try {
         const supabase = createClient();
 
-        // Fetch Parent Topic Title
+        // Fetch Parent Topic Title and Audio URL
         const { data: nodeData } = await supabase
           .from('roadmap_nodes')
-          .select('title')
+          .select('title, audio_url')
           .eq('node_id', moduleId)
           .limit(1);
 
         if (nodeData && nodeData.length > 0) {
-          setModuleTitle(nodeData[0].title);
+          const t = currentLanguage === 'en' ? nodeData[0].title : await translateText(nodeData[0].title, currentLanguage);
+          setModuleTitle(t);
+          setAudioUrl(nodeData[0].audio_url);
         }
 
         // Fetch Micro Topics
@@ -56,6 +126,25 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
             }
           }).filter(Boolean); // Drop failed parses
 
+          if (currentLanguage !== 'en') {
+            for (let i = 0; i < parsedTopics.length; i++) {
+              if (parsedTopics[i].topic_title) {
+                parsedTopics[i].topic_title = await translateText(parsedTopics[i].topic_title, currentLanguage);
+              }
+              if (parsedTopics[i].theory_explanation) {
+                parsedTopics[i].theory_explanation = await translateText(parsedTopics[i].theory_explanation, currentLanguage);
+              }
+              if (parsedTopics[i].resources) {
+                for (let j = 0; j < parsedTopics[i].resources.length; j++) {
+                  if (parsedTopics[i].resources[j].title) {
+                    parsedTopics[i].resources[j].title = await translateText(parsedTopics[i].resources[j].title, currentLanguage);
+                  }
+                }
+              }
+            }
+          }
+
+          setTopicIds(topicsData.map(topic => topic.id));
           setMicroTopics(parsedTopics);
         }
 
@@ -67,7 +156,7 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
     };
 
     fetchMaterials();
-  }, [moduleId]);
+  }, [moduleId, currentLanguage]);
 
   // Writes node completion, study session, and badge checks to DB
   const handleFinish = async () => {
@@ -212,7 +301,15 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
         </div>
 
         <div className="w-full max-w-7xl grid grid-cols-1 lg:grid-cols-12 gap-8 z-10">
-          <aside className="lg:col-span-3 hidden lg:block">
+          <aside className="lg:col-span-3 hidden lg:block space-y-6">
+            <PodcastPlayer
+              title={moduleTitle}
+              content={microTopics.map(t => `${t.topic_title}: ${t.theory_explanation}`).join('\n\n')}
+              roadmapId={id}
+              nodeId={moduleId}
+              initialAudioUrl={audioUrl}
+            />
+
             <div className="sticky top-28 bg-white/80 backdrop-blur-md p-6 rounded-3xl border border-gray-100 shadow-sm">
               <h3 className="font-display font-bold text-lg text-gray-900 mb-6">Topic Outline</h3>
               <div className="relative pl-2">
@@ -266,16 +363,16 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
                 <h2 className="font-display font-bold text-2xl text-gray-900 mb-6">{currentTopic.topic_title || "Conceptual Deep Dive"}</h2>
 
                 {currentTopic.theory_explanation ? (
-                  <div className="text-gray-700 leading-relaxed text-[17px] space-y-4">
-                    {currentTopic.theory_explanation.split('\n').map((line: string, i: number) => {
-                      if (!line.trim()) return null;
-                      // Basic regex for **bold** and `code`
-                      const formattedLine = line
-                        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                        .replace(/`([^`]+)`/g, '<code style="background-color: rgba(243, 244, 246, 0.5); color: #db2777; padding: 2px 6px; border-radius: 4px; font-size: 14px;">$1</code>')
-                        .replace(/\*   /g, '• '); // basic bullet point conversion
-                      return <p key={i} dangerouslySetInnerHTML={{ __html: formattedLine }} />;
-                    })}
+                  <div
+                    className={`prose max-w-none text-gray-700 leading-relaxed text-[17px] transition-colors duration-200 ${isHighlighterMode ? 'cursor-text selection:bg-[#FFD700] selection:text-gray-900' : ''}`}
+                    onMouseUp={handleContentMouseUp}
+                  >
+                    <ReactMarkdown
+                      remarkPlugins={[remarkGfm, remarkMath]}
+                      rehypePlugins={[rehypeKatex]}
+                    >
+                      {currentTopic.theory_explanation}
+                    </ReactMarkdown>
                   </div>
                 ) : (
                   <p className="text-gray-500 italic">No theory explanation was generated for this topic.</p>
@@ -311,6 +408,16 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
                   </div>
                 </div>
               )}
+
+              <div className="mt-10 flex justify-center border-t border-gray-50 pt-8">
+                <button
+                  onClick={() => setShowFeedbackModal(true)}
+                  className="flex items-center gap-2 px-5 py-2.5 bg-[#FEF3C7] text-[#B45309] hover:bg-[#FDE68A] border border-[#FDE68A] rounded-xl font-medium transition-colors cursor-pointer shadow-sm active:scale-95"
+                >
+                  <MessageSquarePlus className="w-5 h-5" />
+                  Having trouble understanding? Share your difficulties
+                </button>
+              </div>
             </motion.div>
 
             <div className="flex justify-between items-center bg-white rounded-2xl p-4 shadow-sm border border-gray-100">
@@ -345,6 +452,76 @@ export default function MaterialsPage({ params }: { params: Promise<{ id: string
           </div>
         </div>
       </main>
+
+      {/* Highlighter Action Button */}
+      {microTopics && microTopics.length > 0 && (
+        <button
+          onClick={() => setIsHighlighterMode(!isHighlighterMode)}
+          className={`fixed bottom-6 right-6 z-50 p-4 rounded-full shadow-xl transition-all ${isHighlighterMode ? 'bg-[#FFD700] text-gray-900 ring-4 ring-yellow-200 scale-110' : 'bg-gray-800 text-white hover:scale-105'}`}
+          title="Toggle AI Reading Assistant"
+        >
+          <Pencil className="w-6 h-6" />
+        </button>
+      )}
+
+      {/* Context Chatbot Overlay Panel */}
+      {microTopics && microTopics.length > 0 && currentTopic && (
+        <ContextChatbot
+          isOpen={showChatbot}
+          onClose={() => setShowChatbot(false)}
+          selectedText={selectedText}
+          materialContext={currentTopic.theory_explanation || ""}
+        />
+      )}
+
+      {/* Feedback Modal Overlay */}
+      <AnimatePresence>
+        {showFeedbackModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-gray-900/40 backdrop-blur-sm">
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="w-full max-w-lg bg-white rounded-3xl p-6 md:p-8 shadow-2xl border border-gray-100 relative"
+            >
+              <button
+                onClick={() => setShowFeedbackModal(false)}
+                className="absolute top-6 right-6 text-gray-400 hover:text-gray-600 transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+
+              <h3 className="font-display font-bold text-2xl text-gray-900 mb-2">Share Your Difficulties</h3>
+              <p className="text-gray-500 mb-6 text-sm">Let us know what parts of this topic were hard to understand, and what you wish would change (e.g., more examples, clearer explanations).</p>
+
+              <textarea
+                value={feedbackText}
+                onChange={(e) => setFeedbackText(e.target.value)}
+                placeholder="I found the concept of [X] confusing because..."
+                className="w-full h-32 p-4 rounded-xl border border-gray-200 bg-gray-50 focus:bg-white focus:ring-2 focus:ring-[#FFD700] focus:border-transparent transition-all resize-none outline-none text-gray-700"
+              />
+
+              <div className="flex justify-end gap-3 mt-6">
+                <button
+                  onClick={() => setShowFeedbackModal(false)}
+                  className="px-5 py-2.5 rounded-xl font-bold text-gray-600 hover:bg-gray-100 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleFeedbackSubmit}
+                  disabled={isSubmittingFeedback || !feedbackText.trim()}
+                  className="flex items-center gap-2 px-6 py-2.5 rounded-xl font-bold bg-[#FFD700] text-gray-900 hover:bg-[#E6C200] transition-colors disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+                >
+                  {isSubmittingFeedback ? <Loader2 className="w-5 h-5 animate-spin" /> : null}
+                  Submit Feedback
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
       <Footer />
     </div>
   );

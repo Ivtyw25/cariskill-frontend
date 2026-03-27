@@ -14,6 +14,8 @@ import {
 } from 'lucide-react';
 import { createClient } from '@/utils/supabase/client';
 import CalendarEventModal from '@/components/CalendarEventModal';
+import SkillLanguageSelector from '@/components/SkillLanguageSelector';
+import { useSkillLanguage } from '@/components/SkillLanguageProvider';
 
 export interface SkillModule {
   id: string;
@@ -37,10 +39,12 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
   const highlightId = searchParams.get('highlight');
 
   const [data, setData] = useState<DetailedRoadmap | null>(null);
+  const [localizedData, setLocalizedData] = useState<DetailedRoadmap | null>(null);
   const [currentLevel, setCurrentLevel] = useState(1);
   const [loading, setLoading] = useState(true);
   const [highlightedModuleId, setHighlightedModuleId] = useState<string | null>(null);
   const [calendarModule, setCalendarModule] = useState<{ id: string; title: string } | null>(null);
+  const { currentLanguage, translateText } = useSkillLanguage();
 
   useEffect(() => {
     const fetchData = async () => {
@@ -65,10 +69,10 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
             roadmapIdTemp = nodeData[0].roadmap_id;
             pageTitleTemp = nodeData[0].title;
           } else {
-            // 2. Fallback: Try to find the ROADMAP (if user manually typed /skill/NextJS)
+            // 2. Try to find own ROADMAP directly
             let query = supabase
               .from('roadmaps')
-              .select('id, topic')
+              .select('id, topic, content')
               .eq('user_id', user.id)
               .order('created_at', { ascending: false })
               .limit(1);
@@ -77,56 +81,154 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
             else query = query.ilike('topic', `%${id.replace(/-/g, ' ')}%`);
 
             const { data: roadmaps } = await query;
+            let ownerRoadmapContent: any = null;
             if (roadmaps && roadmaps.length > 0) {
               roadmapIdTemp = roadmaps[0].id;
               pageTitleTemp = roadmaps[0].topic;
+              ownerRoadmapContent = roadmaps[0].content;
             }
-          }
 
-          // 3. Fetch all modules, progress and edges for the resolved Roadmap ID
-          if (roadmapIdTemp) {
-            const [nodesRes, progressRes, edgesRes] = await Promise.all([
-              supabase.from('roadmap_nodes').select('*').eq('roadmap_id', roadmapIdTemp).order('depth_level', { ascending: true }),
-              supabase.from('node_progress').select('node_id').eq('user_id', user.id).eq('roadmap_id', roadmapIdTemp).eq('is_completed', true),
-              supabase.from('roadmap_edges').select('source_node_id, target_node_id').eq('roadmap_id', roadmapIdTemp),
-            ]);
+            // Helper to extract modules from roadmaps.content JSON
+            const buildModulesFromContent = (rawContent: any): SkillModule[] => {
+              try {
+                const parsed = typeof rawContent === 'string' ? JSON.parse(rawContent) : rawContent;
+                let items: any[] = [];
+                if (Array.isArray(parsed)) items = parsed;
+                else if (parsed?.phases) items = parsed.phases;
+                else if (parsed?.roadmap?.phases) items = parsed.roadmap.phases;
+                else if (parsed?.learning_path) items = parsed.learning_path;
+                else if (parsed?.roadmap?.learning_path) items = parsed.roadmap.learning_path;
+                else if (parsed?.modules) items = parsed.modules;
+                else {
+                  const findArr = (obj: any): any[] | null => {
+                    if (!obj || typeof obj !== 'object') return null;
+                    for (const key of Object.keys(obj)) {
+                      if (Array.isArray(obj[key]) && obj[key].length > 0) return obj[key];
+                      const nested = findArr(obj[key]);
+                      if (nested) return nested;
+                    }
+                    return null;
+                  };
+                  items = findArr(parsed) || [];
+                }
+                return items.map((step: any, idx: number) => ({
+                  id: step?.node_id || step?.id || `m${idx + 1}`,
+                  title: step?.title || step?.skill || `Phase ${idx + 1}`,
+                  description: step?.rationale || step?.obj || step?.description || step?.content || "Learn the concepts to master this step.",
+                  isLocked: false,
+                  isCompleted: false,
+                  level: idx + 1,
+                }));
+              } catch {
+                return [];
+              }
+            };
 
-            const nodes = nodesRes.data;
-            const completedNodeIds = new Set((progressRes.data || []).map((p: any) => p.node_id));
-            const edges = edgesRes.data || [];
+            // 3. If still not found and it's a UUID, use admin API for saved community roadmaps
+            if (!roadmapIdTemp && isUUID) {
+              try {
+                const res = await fetch(`/api/community/skill-nodes/${id}`, { credentials: 'include' });
+                if (res.ok) {
+                  const communityData = await res.json();
+                  const { topic, nodes, edges, completedNodeIds: completed, content } = communityData;
 
-            // Build prerequisite map: nodeId -> [prerequisite node_ids]
-            const prereqMap = new Map<string, string[]>();
-            edges.forEach((e: any) => {
-              if (!prereqMap.has(e.target_node_id)) prereqMap.set(e.target_node_id, []);
-              prereqMap.get(e.target_node_id)!.push(e.source_node_id);
-            });
+                  let finalNodes = nodes && nodes.length > 0 ? nodes : null;
+                  let finalModules: SkillModule[] = [];
 
-            if (nodes && nodes.length > 0) {
-              const mappedModules: SkillModule[] = nodes.map((n) => {
-                const isCompleted = completedNodeIds.has(n.node_id);
-                // A node is unlocked if it has no prerequisites OR all prerequisites are completed
-                const prereqs = prereqMap.get(n.node_id) || [];
-                const isLocked = prereqs.length > 0 && !prereqs.every(pid => completedNodeIds.has(pid));
+                  if (finalNodes && finalNodes.length > 0) {
+                    const completedSet = new Set<string>(completed);
+                    const prereqMap = new Map<string, string[]>();
+                    (edges || []).forEach((e: any) => {
+                      if (!prereqMap.has(e.target_node_id)) prereqMap.set(e.target_node_id, []);
+                      prereqMap.get(e.target_node_id)!.push(e.source_node_id);
+                    });
+                    finalModules = finalNodes.map((n: any) => {
+                      const isCompleted = completedSet.has(n.node_id);
+                      const prereqs = prereqMap.get(n.node_id) || [];
+                      const isLocked = prereqs.length > 0 && !prereqs.every((pid: string) => completedSet.has(pid));
+                      return {
+                        id: n.node_id,
+                        title: n.title,
+                        description: n.rationale || "Learn the concepts to master this module.",
+                        isLocked,
+                        isCompleted,
+                        level: n.depth_level,
+                      };
+                    });
+                  } else if (content) {
+                    // Fallback: parse roadmaps.content JSON (roadmap was published before nodes were saved)
+                    finalModules = buildModulesFromContent(content);
+                  }
 
-                return {
-                  id: n.node_id,
-                  title: n.title,
-                  description: n.rationale || "Learn the concepts to master this module.",
-                  isLocked: isLocked,
-                  isCompleted: isCompleted,
-                  level: n.depth_level,
-                };
+                  if (finalModules.length > 0) {
+                    setData({ id, title: topic || "Skill Overview", userCount: "", modules: finalModules });
+                    setLoading(false);
+                    return;
+                  }
+                }
+              } catch (e) {
+                console.error("Community skill-nodes API failed:", e);
+              }
+            }
+
+            // 4. Fetch all modules, progress and edges for the resolved Roadmap ID (own roadmaps)
+            if (roadmapIdTemp) {
+              const [nodesRes, progressRes, edgesRes] = await Promise.all([
+                supabase.from('roadmap_nodes').select('*').eq('roadmap_id', roadmapIdTemp).order('depth_level', { ascending: true }),
+                supabase.from('node_progress').select('node_id').eq('user_id', user.id).eq('roadmap_id', roadmapIdTemp).eq('is_completed', true),
+                supabase.from('roadmap_edges').select('source_node_id, target_node_id').eq('roadmap_id', roadmapIdTemp),
+              ]);
+
+              const nodes = nodesRes.data;
+              const completedNodeIds = new Set((progressRes.data || []).map((p: any) => p.node_id));
+              const edges = edgesRes.data || [];
+
+              // Build prerequisite map: nodeId -> [prerequisite node_ids]
+              const prereqMap = new Map<string, string[]>();
+              edges.forEach((e: any) => {
+                if (!prereqMap.has(e.target_node_id)) prereqMap.set(e.target_node_id, []);
+                prereqMap.get(e.target_node_id)!.push(e.source_node_id);
               });
 
-              setData({
-                id: roadmapIdTemp,
-                title: pageTitleTemp || "Skill Overview",
-                userCount: "",
-                modules: mappedModules
-              });
-              setLoading(false);
-              return;
+              if (nodes && nodes.length > 0) {
+                const mappedModules: SkillModule[] = nodes.map((n) => {
+                  const isCompleted = completedNodeIds.has(n.node_id);
+                  // A node is unlocked if it has no prerequisites OR all prerequisites are completed
+                  const prereqs = prereqMap.get(n.node_id) || [];
+                  const isLocked = prereqs.length > 0 && !prereqs.every(pid => completedNodeIds.has(pid));
+
+                  return {
+                    id: n.node_id,
+                    title: n.title,
+                    description: n.rationale || "Learn the concepts to master this module.",
+                    isLocked: isLocked,
+                    isCompleted: isCompleted,
+                    level: n.depth_level,
+                  };
+                });
+
+                setData({
+                  id: roadmapIdTemp,
+                  title: pageTitleTemp || "Skill Overview",
+                  userCount: "",
+                  modules: mappedModules
+                });
+                setLoading(false);
+                return;
+              } else if (ownerRoadmapContent) {
+                // Fallback for personal roadmap if nodes are missing
+                const mappedModules = buildModulesFromContent(ownerRoadmapContent);
+                if (mappedModules.length > 0) {
+                  setData({
+                    id: roadmapIdTemp,
+                    title: pageTitleTemp || "Skill Overview",
+                    userCount: "",
+                    modules: mappedModules
+                  });
+                  setLoading(false);
+                  return;
+                }
+              }
             }
           }
         }
@@ -156,10 +258,40 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
     fetchData();
   }, [id]);
 
+  // Translate Data
+  useEffect(() => {
+    const localize = async () => {
+      if (!data) return;
+      if (currentLanguage === 'en') {
+        setLocalizedData(data);
+        return;
+      }
+
+      setLoading(true);
+      try {
+        const tTitle = await translateText(data.title, currentLanguage);
+        const tModules = await Promise.all(
+          data.modules.map(async m => {
+            const mTitle = await translateText(m.title, currentLanguage);
+            const mDesc = await translateText(m.description, currentLanguage);
+            return { ...m, title: mTitle, description: mDesc };
+          })
+        );
+        setLocalizedData({ ...data, title: tTitle, modules: tModules });
+      } catch (e) {
+        console.error("Translation UI Error:", e);
+        setLocalizedData(data); // fallback to english
+      } finally {
+        setLoading(false);
+      }
+    };
+    localize();
+  }, [data, currentLanguage]);
+
   // When data loads and we have a highlight param, jump to the right level
   useEffect(() => {
-    if (!data || !highlightId) return;
-    const targetModule = data.modules.find(m => m.id === highlightId);
+    if (!localizedData || !highlightId) return;
+    const targetModule = localizedData.modules.find(m => m.id === highlightId);
     if (targetModule) {
       setCurrentLevel(targetModule.level);
       setHighlightedModuleId(highlightId);
@@ -169,9 +301,9 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
         if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }, 300);
     }
-  }, [data, highlightId]);
+  }, [localizedData, highlightId]);
 
-  if (loading) {
+  if (loading || (data && !localizedData)) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#FFFDF6]">
         <Loader2 className="w-12 h-12 text-[#FFD700] animate-spin" />
@@ -181,10 +313,10 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
 
   if (!data) return notFound();
 
-  const levels = Array.from(new Set(data.modules.map(m => m.level))).sort((a, b) => a - b);
+  const levels = Array.from(new Set(localizedData.modules.map(m => m.level))).sort((a, b) => a - b);
   const minLevel = levels[0] || 1;
   const maxLevel = levels[levels.length - 1] || 1;
-  const currentLevelModules = data.modules.filter(m => m.level === currentLevel);
+  const currentLevelModules = localizedData.modules.filter(m => m.level === currentLevel);
 
   // Dynamic Level Progress Calculator
   const totalModulesInLevel = currentLevelModules.length;
@@ -199,13 +331,20 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
         <div className="absolute inset-0 pointer-events-none z-0 opacity-30 bg-[radial-gradient(#FDE68A_1.5px,transparent_1.5px)] [background-size:24px_24px]" />
 
         {/* Header Section */}
-        <div className="text-center z-10 mb-12 max-w-2xl px-4">
+        <div className="text-center z-10 mb-8 max-w-2xl px-4 flex flex-col items-center">
           <motion.h1
             initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
             className="font-display text-4xl md:text-5xl font-bold text-gray-900 mb-2 capitalize"
           >
-            {data.title}
+            {localizedData.title}
           </motion.h1>
+        </div>
+
+        {/* Top Right Actions */}
+        <div className="absolute top-8 right-4 md:right-8 z-20">
+          <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.2 }}>
+            <SkillLanguageSelector />
+          </motion.div>
         </div>
 
         {/* Dynamic Level Progress Bar Tracker */}
@@ -325,7 +464,7 @@ export default function SkillDetailPage({ params }: { params: Promise<{ id: stri
                   <ToolButton
                     icon={CheckSquare}
                     label="Quiz"
-                    href={`/skill/${id}/${module.id}/quiz`}
+                    href={`/skill/${id}/${module.id}/quiz/setup`}
                   />
                   <ToolButton
                     icon={FileText}
