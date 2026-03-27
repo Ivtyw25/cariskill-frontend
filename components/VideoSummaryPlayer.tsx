@@ -10,7 +10,7 @@ interface VideoSummaryPlayerProps {
   initialVideoUrl?: string | null;
 }
 
-const BACKEND_URL = "http://localhost:8000";
+const BACKEND_URL = process.env.NEXT_PUBLIC_AI_WORKER_URL || "http://localhost:8000";
 
 export default function VideoSummaryPlayer({ textContent, nodeId, initialVideoUrl }: VideoSummaryPlayerProps) {
   const [status, setStatus] = useState<'idle' | 'processing' | 'completed' | 'error'>(initialVideoUrl ? 'completed' : 'idle');
